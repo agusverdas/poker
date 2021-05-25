@@ -24,14 +24,18 @@ case object IncorrectPlayer extends Exception
 
 case object SmallBlindWasNotDoneYet extends Exception
 
+sealed trait BlindType
+
+case object SmallBlind extends BlindType
+
+case object LargeBlind extends BlindType
+
 trait GameService[F[_]] {
   def games: F[List[Game]]
 
   def createGame(table: Table): F[(Table, Game)]
 
-  def smallBlind(gameId: UUID, userId: UUID, bet: BigDecimal): F[Blind]
-
-  def largeBlind(gameId: UUID, userId: UUID, bet: BigDecimal): F[Blind]
+  def blind(blindType: BlindType, gameId: UUID, userId: UUID, bet: BigDecimal): F[Blind]
 
   def opening(gameId: UUID): F[(UsernameID, Combination)]
 
@@ -71,6 +75,7 @@ object GameService {
         )
       )
     )
+
   def of[F[_] : Sync](gameWarehouse: Warehouse[Game, F], sessionWarehouse: Warehouse[UserSession, F], userService: UserService[F]): F[GameService[F]] = new GameService[F] {
     override def games: F[List[Game]] = for {
       entries <- gameWarehouse.entries
@@ -96,23 +101,19 @@ object GameService {
       } yield (updTable, Game(UUID.randomUUID(), dealer, Blind(smallBlindPlayer), Blind(largeBlindPlayer), players = sortedPlayers))
     }
 
-    override def smallBlind(gameId: UUID, userId: UUID, bet: BigDecimal): F[Blind] = for {
+    override def blind(blindType: BlindType, gameId: UUID, userId: UUID, bet: BigDecimal): F[Blind] = for {
       gamePlayer <- validate(gameId, userId)
       (game, _) = gamePlayer
-      blind = game.smallBlind.copy(bet = bet, wasDone = true)
-      updGame = game.copy(bank = game.bank + bet, smallBlind = blind)
+      blind = if (blindType == SmallBlind) {
+        game.smallBlind.copy(bet = bet, wasDone = true)
+      } else game.largeBlind.copy(bet = bet, wasDone = true)
+      updGame = if (blindType == SmallBlind) {
+        game.copy(bank = game.bank + bet, smallBlind = blind)
+      } else game.copy(bank = game.bank + bet, largeBlind = blind)
       _ <- userService.updateBudget(userId, Budget(-bet))
       _ <- gameWarehouse.put(updGame.id, updGame)
-    } yield blind
-
-    override def largeBlind(gameId: UUID, userId: UUID, bet: BigDecimal): F[Blind] = for {
-      gamePlayer <- validate(gameId, userId)
-      (game, _) = gamePlayer
-      blind = game.largeBlind.copy(bet = bet, wasDone = true)
-      updGame = game.copy(bank = game.bank + bet, largeBlind = blind)
-      _ <- userService.updateBudget(userId, Budget(-bet))
-      _ <- gameWarehouse.put(updGame.id, updGame)
-      _ <- initializeCards(game)
+      _ <- if (blindType == LargeBlind) initializeCards(game)
+      else ().pure[F]
     } yield blind
 
     override def opening(gameId: UUID): F[(UsernameID, Combination)] = for {
@@ -121,27 +122,6 @@ object GameService {
       userCombination = game.playerGames.map(game => (game.player, combination(TexasCase(board, game.hand))))
       sorted = userCombination.sortBy(_._2)
     } yield sorted.last
-
-    private[game] def combination(texasCase: TexasCase): Combination =
-      RoyalFlush(texasCase).getOrElse(
-        StraightFlush(texasCase).getOrElse(
-          Straight(texasCase).getOrElse(
-            FourOfAKind(texasCase).getOrElse(
-              FullHouse(texasCase).getOrElse(
-                Flush(texasCase).getOrElse(
-                  ThreeOfKind(texasCase).getOrElse(
-                    TwoPairs(texasCase).getOrElse(
-                      Pair(texasCase).getOrElse(
-                        HighCard(texasCase)
-                      )
-                    )
-                  )
-                )
-              )
-            )
-          )
-        )
-      )
 
     override def playerHand(gameId: UUID, userId: UUID): F[Hand] = for {
       gamePlayer <- validate(gameId, userId)
@@ -161,11 +141,7 @@ object GameService {
       gamePlayer <- validate(gameId, userId)
       (game, player) = gamePlayer
       playerUpd = player.copy(user = player.user.copy(budget = player.user.budget - bet))
-      playerGames = game.playerGames.map(x => if (x.player.id == userId) {
-        x.copy(finish = true)
-      } else {
-        x
-      })
+      playerGames = game.playerGames.map(x => if (x.player.id == userId) x.copy(finish = true) else x)
       _ <- sessionWarehouse.put(playerUpd.user.id, playerUpd)
       gameCopy = game.copy(bank = game.bank + bet, playerGames = playerGames)
       gameUpd = if (gameCopy.playerGames.forall(_.finish)) {

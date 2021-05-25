@@ -26,7 +26,7 @@ final class GameRoutes[F[_] : Sync](gameService: GameService[F], sessions: Wareh
       case Some(session) => (for {
         bet <- req.as[BetDTO]
         _ <- if (bet.bet <= 0) Sync[F].raiseError(BetIsNegative) else ().pure[F]
-        _ <- gameService.smallBlind(uuid, session.user.id, bet.bet)
+        _ <- gameService.blind(SmallBlind, uuid, session.user.id, bet.bet)
       } yield ()) *> Ok("Small blind was done")
     }.handleErrorWith {
       case BetIsNegative => BadRequest(s"Bet is negative or equal to zero")
@@ -40,7 +40,7 @@ final class GameRoutes[F[_] : Sync](gameService: GameService[F], sessions: Wareh
       case Some(session) => (for {
         bet <- req.as[BetDTO]
         _ <- if (bet.bet <= 0) Sync[F].raiseError(BetIsNegative) else ().pure[F]
-        _ <- gameService.largeBlind(uuid, session.user.id, bet.bet)
+        _ <- gameService.blind(LargeBlind, uuid, session.user.id, bet.bet)
       } yield ()) *> Ok("Large blind was done")
     }.handleErrorWith {
       case BetIsNegative => BadRequest(s"Bet is negative or equal to zero")
@@ -49,14 +49,18 @@ final class GameRoutes[F[_] : Sync](gameService: GameService[F], sessions: Wareh
       case UserNotInGame => BadRequest(s"User not in game with id : $uuid")
     }
 
-    case req@POST -> Root / "call" / UUIDVar(uuid) =>
-      isLoggedIn(req, sessions).flatMap {
-        case None => BadRequest(NotLoggedInMessage)
-        case Some(session) => (for {
-          bet <- req.as[BetDTO]
-          _ <- gameService.call(uuid, session.user.id, bet.bet)
-        } yield ()) *> Ok("Call was done")
-      }
+    case req@POST -> Root / "call" / UUIDVar(uuid) => isLoggedIn(req, sessions).flatMap {
+      case None => BadRequest(NotLoggedInMessage)
+      case Some(session) => (for {
+        bet <- req.as[BetDTO]
+        _ <- gameService.call(uuid, session.user.id, bet.bet)
+      } yield ()) *> Ok("Call was done")
+    }.handleErrorWith {
+      case BetIsNegative => BadRequest(s"Bet is negative or equal to zero")
+      case GameNotFound => NotFound(s"Game with id : $uuid was not found")
+      case UserNotFound => NotFound("Can't find user")
+      case UserNotInGame => BadRequest(s"User not in game with id : $uuid")
+    }
 
     case req@GET -> Root / "turn" / UUIDVar(uuid) => isLoggedIn(req, sessions).flatMap {
       case None => BadRequest(NotLoggedInMessage)
@@ -83,6 +87,10 @@ final class GameRoutes[F[_] : Sync](gameService: GameService[F], sessions: Wareh
       case Some(_) => gameService.opening(uuid).flatMap {
         case (user, combination) => Ok(s"User $user won with combination ${combination.name}, ${combination.combination}")
       }
+    }.handleErrorWith {
+      case GameNotFound => NotFound(s"Game with id : $uuid was not found")
+      case UserNotFound => NotFound("Can't find user")
+      case UserNotInGame => BadRequest(s"User not in game with id : $uuid")
     }
   }
 }
